@@ -1,0 +1,331 @@
+from unittest.mock import inplace
+
+#1. quitar de URLs duplicadas
+import pandas as pd
+
+# Carga directamente el archivo limpio si ya existe
+file_path_limpio = '/Users/noel/PyCharmProjects/EMB/imgs_limpio.xlsx'
+df = pd.read_excel(file_path_limpio)
+
+
+columnas_imagenes = ['Imagen 1', 'Imagen 2', 'Imagen 3','Imagen 4' , 'Imagen 5', 'Imagen 6', 'Imagen 7', 'Imagen 8','Imagen 9', 'Imagen 10', 'Imagen 11', 'Imagen 12','Imagen 13', 'Imagen 14', 'Imagen 15','Imagen 16','Imagen 17','Imagen 18','Imagen 19','Imagen 20','Imagen 21','Imagen 22','Imagen 23','Imagen 24','Imagen 25','Imagen 26','Imagen 27','Imagen 28','Imagen 29' ]
+# crear un conjunto para rastrear URLs unicas
+url_vistas = set()
+
+# eliminar duplicados en cada columna de URLs
+for col in columnas_imagenes:
+    df[col] = df[col].apply(lambda url: url if (pd.notna(url) and url not in url_vistas and not url_vistas.add(url)) else None)
+
+# muestra el dataFrame sin duplicados en las columnas de URL
+print(df)
+
+# guarda el dataframe limipo (sin repeticiones)
+df.to_excel('/Users/noel/PyCharmProjects/EMB/imgs_limpio.xlsx', index=False)
+
+print(df.shape)
+print(df.columns)
+print(df.drop_duplicates(inplace=True))
+
+#%%
+#seccion 2 - cargar imagenes desde urls y redimensionarlas
+import requests
+from PIL import Image
+from io import BytesIO
+
+# funcion para cargar una imagen desde url y cambiar su tamaño
+def cargar_imagen_desde_url(url):
+    """carga y redimensionar una imagen directamente desde una URL."""
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            img = Image.open(BytesIO(response.content)).convert("RGB")
+            img = img.resize((224, 224))  # redimensionar a 224x224 píxeles (forma base)
+            return img
+        else:
+            print(f"Error al cargar la imagen: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error cargando la imagen desde {url}: {e}")
+        return None
+
+#%% converitr imagenes a Arrays para que puedan ser procesadas matematicamente por los modelos de machine learning
+import numpy as np
+
+
+# ajustar el tamaño según el modelo
+def image_to_array(image):
+    return np.array(image.resize((224, 224)))
+
+
+
+#%%
+# iterar sobre cada fila del DataFrame usando pandas
+for _, row in df.iterrows():
+    sku = row['SKU']  # SKU = para identificar cada producto
+
+    # iterar sobre todas las columnas de imagenes
+    for col in columnas_imagenes:
+        url = row.get(col)
+
+        # verificar que la URL no sea NaN (que haya una URL presente)
+        if pd.notna(url):
+            # Cargar la imagen desde la URL y redimensionarla
+            img = cargar_imagen_desde_url(url)
+
+            if img:
+                # en este punto, img es la imagen cargada y redimensionada
+                # aqui puedes pasar al siguiente paso para generar el embedding
+                print(f"Imagen procesada para SKU {sku} desde la columna llamada: {col}")
+
+#%%
+# seccion 4: procesar imagenes en el dataframe y generar embeddings
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet50 import preprocess_input
+from tensorflow.keras.models import Model
+
+# cargar modelo preentrenado ResNet50 sin capa superior
+base_model = ResNet50(weights='imagenet', include_top=False, pooling='avg')
+model = Model(inputs=base_model.input, outputs=base_model.output)
+
+# funcion para obtener embedding de la imagen
+def get_embedding(image):
+    image = preprocess_input(image)  # Preprocesar la imagen.
+    return model.predict(np.expand_dims(image, axis=0))[0]
+#%%
+# procesar cada imagen en el dataframe y obtener su embedding
+embeddings = []
+for index, row in df.iterrows():
+    for col in columnas_imagenes:
+        if pd.notna(row[col]):
+            image = cargar_imagen_desde_url(row[col])
+            if image:
+                image_array = image_to_array(image)
+                embedding = get_embedding(image_array)
+                embeddings.append(embedding)
+#%%
+import numpy as np
+# seccion 5: guardar embeddings y ids
+np.save('embeddings.npy', np.array(embeddings))
+df[['SKU']].to_csv('ids.csv', index=False)
+
+
+#%%
+import faiss
+# seccion 6: crear indice faiss y guardar para busqueda de similitud
+
+d = 2048  # dimension de los embeddings.
+index = faiss.IndexFlatL2(d)
+
+# cargar los embeddings y añadirlos.
+embeddings = np.load('embeddings.npy')
+index.add(embeddings)
+
+
+# guardar el indice faiss para evitar re-cargar embeddings en el futuro
+faiss.write_index(index, 'faiss_index.bin')
+
+#Similitud
+
+# funcion para buscar imagenes similares
+def search_similar_images(image_array, k=5):
+    embedding = get_embedding(image_array).reshape(1, -1)
+    distances, indices = index.search(embedding, k)
+    return distances, indices
+
+
+#%%
+#comparativa con el usso de los emmbembirgs
+import streamlit as st
+import numpy as np
+from PIL import Image
+import faiss
+
+# cargar el indice FAISS previamente guardado
+index = faiss.read_index('faiss_index.bin')
+
+def search_similar_images(image_array, k=5):
+    """Buscar imágenes similares usando el índice FAISS."""
+    embedding = get_embedding(image_array).reshape(1, -1)  # Asegúrate de que el embedding tenga la forma correcta
+    distances, indices = index.search(embedding, k)
+    return distances, indices
+
+
+# crear la barra lateral para la busqueda manual
+left, middle = st.sidebar.columns(2)
+
+if left.button("Búsqueda manual", key="manual_search", use_container_width=True):
+    left.markdown("Describe el producto que deseas buscar ")
+
+if middle.button("Búsqueda por selección de imagen", key="image_selection", use_container_width=True):
+    middle.markdown("Sube una imagen.")
+
+    # cargador de archivos para las img
+    uploaded_file = st.file_uploader("Elige una imagen", type=["jpg", "jpeg", "png"])
+
+    if uploaded_file is not None:
+        # mostrar la imagen 
+        image = Image.open(uploaded_file)
+        st.image(image, caption='Imagen cargada', use_column_width=True)
+
+        # convertir la imagen a un array
+        image_array = np.array(image.resize((224, 224)))  # Asegúrate de que el tamaño coincida con el modelo
+
+        # buscar la similitud
+        distances, indices = search_similar_images(image_array)
+
+        # que enseñe los reusltados
+        st.markdown("Imágenes similares encontradas:")
+        for i in range(len(indices[0])):
+            if distances[0][i] < 1.0:  
+                similar_image_url = df.loc[indices[0][i], 'Image_URL']  
+                st.image(similar_image_url, caption=f'Imagen similar {i + 1}', use_column_width=True)
+
+#%%
+import streamlit as st
+from PIL import Image
+import base64
+
+
+st.set_page_config(page_title="Mi Aplicación", layout="wide")
+
+
+img_path_header = "/Users/sarahcardenas/Desktop/Liverpooll.jpg"
+
+# cargar imagen de encabezado y codificarla en base64
+with open(img_path_header, "rb") as img_file:
+    img_base64_header = base64.b64encode(img_file.read()).decode()
+
+
+st.markdown(f"""
+    <style>
+        .top-header {{
+            background-color: #ff007f; 
+            padding: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }}
+        .top-header img {{
+            height: 40px; 
+        }}
+        .top-header .header-text {{
+            color: white;
+            font-size: 20px;
+            font-weight: bold;
+            margin-left: 15px;
+            width: 100%;
+        }}
+        .button-hover:hover {{
+            background-color: pink;
+        }}
+    </style>
+
+    <div class="top-header">
+        <div>
+            <img src="data:image/png;base64,{img_base64_header}" alt="Logo">
+        </div>
+        <div>
+            <span class="header-text">Mis Compras</span>
+            <span class="header-text">Iniciar sesión</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+r
+st.markdown("<br><br>", unsafe_allow_html=True)
+
+
+left, middle, right = st.columns(3)
+
+
+if right.button("Búsqueda con cámara", key="camera_search", use_container_width=True):
+    right.markdown("Toma la fotografía")
+
+    enable = st.checkbox("Enable camera", value=True)  # Se habilita por defecto
+
+
+    if enable:
+     
+        picture = st.camera_input("Take a picture")
+
+    
+        if picture:
+            st.session_state['picture'] = picture
+
+
+    if 'picture' in st.session_state:
+        st.image(st.session_state['picture'])
+
+
+
+if left.button("Búsqueda manual", key="manual_search", use_container_width=True):
+    left.markdown("Describe el producto que deseas buscar ")
+
+if middle.button("Búsqueda por selección de imagen", key="image_selection", use_container_width=True):
+    middle.markdown("Sube una imagen.")
+
+
+    uploaded_file = st.file_uploader("", type=["csv", "txt"])
+
+
+
+
+st.markdown("<br><br>", unsafe_allow_html=True)
+
+
+img_path_pub = "/Users/sarahcardenas/Desktop/publicidad.png"
+
+
+try:
+    with open(img_path_pub, "rb") as img_file_pub:
+        img_pub = Image.open(img_file_pub)
+        st.image(img_pub, use_column_width=True, caption="Publicidad")
+except Exception as e:
+    st.error(f"No se pudo cargar la imagen de publicidad: {e}")
+
+# titulo
+st.markdown(
+    """
+    <style>
+        .center-text {
+            text-align: center;
+            font-size: 24px; /* Cambia el tamaño según lo desees */
+            font-weight: bold; /* Puedes hacer el texto en negrita si lo prefieres */
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# Lista lateral
+img_path = "/Users/sarahcardenas/Desktop/Liverpooll.jpg"
+width = 400
+
+
+with open(img_path, "rb") as img_file:
+    img_base64 = base64.b64encode(img_file.read()).decode()
+
+
+st.markdown("""
+    <style>
+        .sidebar-content {
+            color: black; 
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+
+st.sidebar.image(f"data:image/jpeg;base64,{img_base64}", use_column_width=True)
+
+
+st.sidebar.subheader("Categorías")
+
+
+if st.sidebar.button("Filtros"):
+    st.sidebar.write("Filtros activados.")  # Acción que se realiza al presionar el botón
+
+categorias = ["Mujeres", "Hombres", "Bebés", "Zapatos"]
+
+for categoria in categorias:
+    st.sidebar.markdown(f"<u>{categoria}</u>", unsafe_allow_html=True)
+    st.sidebar.markdown("---")  # Línea divisoria entre categorías
